@@ -27,23 +27,35 @@ export async function getApplication(id) {
   return data.application;
 }
 
-export function useApplications() {
+export function useApplications(enabled = true) {
   const [apps, setApps] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(enabled);
   const [error, setError] = useState("");
 
   const refresh = useCallback(async () => {
+    if (!enabled) {
+      setApps([]);
+      setLoading(false);
+      return;
+    }
+
     setLoading(true);
     setError("");
+
     try {
       const { data } = await api.get("/applications");
       setApps(data.applications);
     } catch (err) {
-      setError(getApiError(err, "Could not load applications"));
+      if (err.response?.status === 401) {
+        setApps([]);
+        setError("");
+      } else {
+        setError(getApiError(err, "Could not load applications"));
+      }
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [enabled]);
 
   useEffect(() => {
     refresh();
@@ -58,7 +70,7 @@ export function useApplications() {
   const update = useCallback(async (id, patch) => {
     const { data } = await api.put(`/applications/${id}`, patch);
     setApps((current) =>
-      current.map((app) => (app.id === id ? data.application : app)),
+      current.map((app) => (app.id === id ? data.application : app))
     );
     return data.application;
   }, []);

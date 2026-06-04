@@ -21,8 +21,10 @@ export default function Home() {
 
   const profileRef = useRef(null);
 
-  const { apps, loading, error, add, update, remove } = useApplications();
-  const { user, logout } = useAuth();
+const { user, loading: authLoading, logout } = useAuth();
+
+const { apps, loading, error, add, update, remove } =
+  useApplications(!authLoading && !!user);
 
   useEffect(() => {
     const closeProfileMenu = (event) => {
