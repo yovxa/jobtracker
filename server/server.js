@@ -1,15 +1,24 @@
+import "dotenv/config";
 import { createServer } from "node:http";
-import { randomBytes, pbkdf2Sync, timingSafeEqual, createHash, randomUUID } from "node:crypto";
+import { randomBytes, pbkdf2Sync, timingSafeEqual, randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import jwt from "jsonwebtoken";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = join(__dirname, "data");
 const DB_FILE = join(DATA_DIR, "db.json");
-const PORT = Number(process.env.PORT || 4000);
-const SESSION_COOKIE = "trackhire_session";
-const CLIENT_ORIGIN = "http://localhost:5173";
+
+const PORT = Number(process.env.PORT);
+const SESSION_COOKIE = process.env.SESSION_COOKIE;
+const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN;
+const SESSION_MAX_AGE = Number(process.env.SESSION_MAX_AGE);
+const JWT_SECRET = process.env.JWT_SECRET;
+
+if (!JWT_SECRET) {
+  throw new Error("JWT_SECRET is missing in .env");
+}
 
 const STATUS_ORDER = ["applied", "interview", "offer", "rejected"];
 
@@ -22,14 +31,17 @@ const json = (res, status, body, headers = {}) => {
     "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
     ...headers,
   });
+
   res.end(JSON.stringify(body));
 };
 
 const cookieOptions = [
   "HttpOnly",
   "Path=/",
-  "SameSite=Lax",
-  "Max-Age=604800",
+  process.env.NODE_ENV === "production"
+    ? "SameSite=None; Secure"
+    : "SameSite=Lax",
+  `Max-Age=${SESSION_MAX_AGE}`,
 ].join("; ");
 
 const clearCookieOptions = [
@@ -50,13 +62,18 @@ const parseCookies = (req) =>
         const key = index === -1 ? part : part.slice(0, index);
         const value = index === -1 ? "" : part.slice(index + 1);
         return [key, decodeURIComponent(value)];
-      }),
+      })
   );
 
 const readBody = async (req) => {
   const chunks = [];
-  for await (const chunk of req) chunks.push(chunk);
+
+  for await (const chunk of req) {
+    chunks.push(chunk);
+  }
+
   if (chunks.length === 0) return {};
+
   try {
     return JSON.parse(Buffer.concat(chunks).toString("utf8"));
   } catch {
@@ -68,10 +85,20 @@ const readBody = async (req) => {
 
 const ensureDb = async () => {
   await mkdir(DATA_DIR, { recursive: true });
+
   try {
-    return JSON.parse(await readFile(DB_FILE, "utf8"));
+    const db = JSON.parse(await readFile(DB_FILE, "utf8"));
+
+    return {
+      users: db.users || [],
+      applications: db.applications || [],
+    };
   } catch {
-    const fresh = { users: [], sessions: [], applications: [] };
+    const fresh = {
+      users: [],
+      applications: [],
+    };
+
     await writeFile(DB_FILE, JSON.stringify(fresh, null, 2));
     return fresh;
   }
@@ -92,10 +119,9 @@ const verifyPassword = (password, salt, expectedHash) => {
   const { hash } = hashPassword(password, salt);
   const left = Buffer.from(hash, "hex");
   const right = Buffer.from(expectedHash, "hex");
+
   return left.length === right.length && timingSafeEqual(left, right);
 };
-
-const hashToken = (token) => createHash("sha256").update(token).digest("hex");
 
 const publicUser = (user) => ({
   id: user.id,
@@ -103,41 +129,69 @@ const publicUser = (user) => ({
   email: user.email,
 });
 
-const createSession = (db, userId) => {
-  const token = randomBytes(32).toString("hex");
-  db.sessions.push({
-    id: randomUUID(),
-    userId,
-    tokenHash: hashToken(token),
-    createdAt: new Date().toISOString(),
-  });
-  return token;
-};
+const createJwt = (user) =>
+  jwt.sign(
+    {
+      userId: user.id,
+    },
+    JWT_SECRET,
+    {
+      expiresIn: SESSION_MAX_AGE,
+    }
+  );
 
-const requireUser = async (req) => {
+const requireUser = async (req, res) => {
   const token = parseCookies(req)[SESSION_COOKIE];
+
   if (!token) {
     const error = new Error("Missing auth token");
     error.status = 401;
     throw error;
   }
 
-  const db = await ensureDb();
-  const session = db.sessions.find((item) => item.tokenHash === hashToken(token));
-  const user = session && db.users.find((item) => item.id === session.userId);
-  if (!user) {
+  try {
+    const payload = jwt.verify(token, JWT_SECRET);
+
+    const db = await ensureDb();
+    const user = db.users.find(
+      (item) => item.id === payload.userId
+    );
+
+    if (!user) {
+      const error = new Error("Invalid auth token");
+      error.status = 401;
+      throw error;
+    }
+
+    const newToken = createJwt(user);
+
+    res.setHeader(
+      "Set-Cookie",
+      `${SESSION_COOKIE}=${encodeURIComponent(
+        newToken
+      )}; ${cookieOptions}`
+    );
+
+    return { db, user };
+  } catch {
     const error = new Error("Invalid auth token");
     error.status = 401;
     throw error;
   }
-
-  return { db, user, token };
 };
 
 const sanitizeApplication = (input, userId, existing = {}) => {
   const now = new Date().toISOString();
-  const status = STATUS_ORDER.includes(input.status) ? input.status : existing.status || "applied";
-  const dateValue = input.appliedDate === undefined ? existing.appliedDate || now : input.appliedDate;
+
+  const status = STATUS_ORDER.includes(input.status)
+    ? input.status
+    : existing.status || "applied";
+
+  const dateValue =
+    input.appliedDate === undefined
+      ? existing.appliedDate || now
+      : input.appliedDate;
+
   const parsedDate = new Date(dateValue);
 
   if (Number.isNaN(parsedDate.getTime())) {
@@ -147,7 +201,9 @@ const sanitizeApplication = (input, userId, existing = {}) => {
   }
 
   const field = (name) =>
-    input[name] === undefined ? String(existing[name] || "").trim() : String(input[name] || "").trim();
+    input[name] === undefined
+      ? String(existing[name] || "").trim()
+      : String(input[name] || "").trim();
 
   return {
     ...existing,
@@ -172,34 +228,45 @@ const validateApplication = (app) => {
 };
 
 const sendAuthPayload = async (res, db, user) => {
-  const token = createSession(db, user.id);
+  const token = createJwt(user);
+
   await saveDb(db);
+
   json(
     res,
     200,
     { user: publicUser(user) },
-    { "Set-Cookie": `${SESSION_COOKIE}=${encodeURIComponent(token)}; ${cookieOptions}` },
+    {
+      "Set-Cookie": `${SESSION_COOKIE}=${encodeURIComponent(token)}; ${cookieOptions}`,
+    }
   );
 };
 
 const routes = {
   "POST /api/auth/register": async (req, res) => {
     const body = await readBody(req);
+
     const name = String(body.name || "").trim();
     const email = normalizeEmail(body.email);
     const password = String(body.password || "");
 
     if (!name || !email || password.length < 6) {
-      return json(res, 400, { message: "Name, valid email, and 6+ character password are required" });
+      return json(res, 400, {
+        message: "Name, valid email, and 6+ character password are required",
+      });
     }
 
     const db = await ensureDb();
+
     if (db.users.some((user) => user.email === email)) {
-      return json(res, 409, { message: "An account already exists for this email" });
+      return json(res, 409, {
+        message: "An account already exists for this email",
+      });
     }
 
     const passwordHash = hashPassword(password);
     const now = new Date().toISOString();
+
     const user = {
       id: randomUUID(),
       name,
@@ -211,69 +278,92 @@ const routes = {
     };
 
     db.users.push(user);
+
     await sendAuthPayload(res, db, user);
   },
 
   "POST /api/auth/login": async (req, res) => {
     const body = await readBody(req);
+
     const email = normalizeEmail(body.email);
     const password = String(body.password || "");
+
     const db = await ensureDb();
     const user = db.users.find((item) => item.email === email);
 
     if (!user || !verifyPassword(password, user.passwordSalt, user.passwordHash)) {
-      return json(res, 401, { message: "Email or password is incorrect" });
+      return json(res, 401, {
+        message: "Email or password is incorrect",
+      });
     }
 
     await sendAuthPayload(res, db, user);
   },
 
   "GET /api/auth/me": async (req, res) => {
-    const { user } = await requireUser(req);
-    json(res, 200, { user: publicUser(user) });
+    try {
+      const { user } = await requireUser(req, res);
+      json(res, 200, { user: publicUser(user) });
+    } catch {
+      json(res, 200, { user: null });
+    }
   },
 
   "POST /api/auth/logout": async (req, res) => {
-    const token = parseCookies(req)[SESSION_COOKIE];
-    if (token) {
-      const db = await ensureDb();
-      db.sessions = db.sessions.filter((item) => item.tokenHash !== hashToken(token));
-      await saveDb(db);
-    }
-    json(res, 200, { ok: true }, { "Set-Cookie": `${SESSION_COOKIE}=; ${clearCookieOptions}` });
+    json(
+      res,
+      200,
+      { ok: true },
+      {
+        "Set-Cookie": `${SESSION_COOKIE}=; ${clearCookieOptions}`,
+      }
+    );
   },
 
   "GET /api/applications": async (req, res) => {
-    const { db, user } = await requireUser(req);
+    const { db, user } = await requireUser(req, res);
+
     const apps = db.applications
       .filter((app) => app.userId === user.id)
       .sort((a, b) => +new Date(b.appliedDate) - +new Date(a.appliedDate));
+
     json(res, 200, { applications: apps });
   },
 
   "POST /api/applications": async (req, res) => {
-    const { db, user } = await requireUser(req);
+    const { db, user } = await requireUser(req, res);
     const body = await readBody(req);
     const now = new Date().toISOString();
+
     const app = sanitizeApplication(body, user.id);
+
     validateApplication(app);
+
     app.id = randomUUID();
     app.createdAt = now;
     app.updatedAt = now;
     app.history = [{ status: app.status, at: now }];
+
     db.applications.unshift(app);
+
     await saveDb(db);
+
     json(res, 201, { application: app });
   },
 };
 
 const matchApplicationRoute = async (req, res, method, pathname) => {
   const match = pathname.match(/^\/api\/applications\/([^/]+)$/);
+
   if (!match) return false;
 
   const id = match[1];
-  const { db, user } = await requireUser(req);
-  const index = db.applications.findIndex((app) => app.id === id && app.userId === user.id);
+
+  const { db, user } = await requireUser(req, res);
+
+  const index = db.applications.findIndex(
+    (app) => app.id === id && app.userId === user.id
+  );
 
   if (index === -1) {
     json(res, 404, { message: "Application not found" });
@@ -289,21 +379,31 @@ const matchApplicationRoute = async (req, res, method, pathname) => {
     const body = await readBody(req);
     const existing = db.applications[index];
     const updated = sanitizeApplication(body, user.id, existing);
+
     validateApplication(updated);
+
     if (updated.status !== existing.status) {
-      updated.history = [...(existing.history || []), { status: updated.status, at: updated.updatedAt }];
+      updated.history = [
+        ...(existing.history || []),
+        { status: updated.status, at: updated.updatedAt },
+      ];
     } else {
       updated.history = existing.history || [];
     }
+
     db.applications[index] = updated;
+
     await saveDb(db);
+
     json(res, 200, { application: updated });
     return true;
   }
 
   if (method === "DELETE") {
     db.applications.splice(index, 1);
+
     await saveDb(db);
+
     json(res, 200, { ok: true });
     return true;
   }
@@ -313,18 +413,27 @@ const matchApplicationRoute = async (req, res, method, pathname) => {
 
 const server = createServer(async (req, res) => {
   try {
-    if (req.method === "OPTIONS") return json(res, 204, {});
+    if (req.method === "OPTIONS") {
+      return json(res, 204, {});
+    }
 
     const url = new URL(req.url, `http://${req.headers.host}`);
     const key = `${req.method} ${url.pathname}`;
     const route = routes[key];
 
-    if (route) return await route(req, res);
-    if (await matchApplicationRoute(req, res, req.method, url.pathname)) return;
+    if (route) {
+      return await route(req, res);
+    }
+
+    if (await matchApplicationRoute(req, res, req.method, url.pathname)) {
+      return;
+    }
 
     json(res, 404, { message: "Route not found" });
   } catch (error) {
-    json(res, error.status || 500, { message: error.message || "Server error" });
+    json(res, error.status || 500, {
+      message: error.message || "Server error",
+    });
   }
 });
 
