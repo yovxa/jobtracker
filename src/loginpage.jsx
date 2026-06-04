@@ -59,7 +59,7 @@ export default function LoginPage() {
             <LockKeyhole className="h-5 w-5" />
           </div>
           <div>
-            <h1 className="text-xl font-bold">Track hire</h1>
+            <h1 className="text-xl font-bold">Joblio</h1>
             <p className="text-sm text-[#959eb8]">
               {mode === "login" ? "Sign in to your workspace" : "Create your workspace"}
             </p>

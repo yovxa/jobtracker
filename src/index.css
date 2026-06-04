@@ -6,20 +6,7 @@ body {
 }
 
 :root {
-  /*--color-background: #050517;
-  --color-foreground: #eff2f9;
-  --color-surface: #0e0e27;
-  --color-muted: #161731;
-  --color-muted-foreground: #959eb8;
-  --color-border: #232546;
-  --color-primary: #5b62f9;
-  --color-primary-foreground: #f6f8ff;
-  --color-primary-glow: #8986ff;
-  --color-accent: #26245e;
-  --color-destructive: #ee343a;*/
-
-  
-  --color-status-applied: #5aa3ec;
+    --color-status-applied: #5aa3ec;
   --color-status-interview: #dfb100;
   --color-status-offer: #4cd676;
   --color-status-rejected: #f14d4c;
@@ -31,24 +18,3 @@ body {
   --color-border-hover: #8867C5;
   --color-btn: #6E46B9;
 }
-
-/*
-@theme {
-  --font-sans: "DM Sans", system-ui, sans-serif;
-  --font-display: "Space Grotesk", system-ui, sans-serif;
-
-  --color-background: oklch(0.13 0.04 280);
-  --color-foreground: oklch(0.96 0.01 270);
-  --color-surface: oklch(0.18 0.05 280);
-  --color-muted: oklch(0.22 0.05 280);
-  --color-muted-foreground: oklch(0.7 0.04 270);
-  --color-border: oklch(0.28 0.06 280);
-  --color-primary: oklch(0.58 0.22 275);
-  --color-primary-foreground: oklch(0.98 0.01 270);
-  --color-primary-glow: oklch(0.7 0.22 280);
-  --color-accent: oklch(0.3 0.1 280);
-  --color-destructive: oklch(0.62 0.22 25);
-
-}
-*/
-
