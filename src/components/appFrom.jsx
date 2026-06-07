@@ -49,7 +49,7 @@ export default function AppForm({
           />
         </div>
         <div>
-          <label className={lblstyle}>Role *</label>
+          <label className={lblstyle}>Position *</label>
           <input
             className={inputstyle}
             value={formData.position}
